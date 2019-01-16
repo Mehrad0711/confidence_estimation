@@ -1,6 +1,5 @@
 import pdb
 import sys
-import visdom
 import argparse
 import numpy as np
 from tqdm import tqdm
@@ -27,9 +26,6 @@ from utils.utils import encode_onehot, CSVLogger, Cutout
 
 from tensorboardX import SummaryWriter
 
-vis = visdom.Visdom()
-vis.env = 'confidence_estimation'
-
 conf_histogram = None
 
 dataset_options = ['cifar10', 'svhn']
@@ -54,10 +50,12 @@ parser.add_argument('--log_dir', type=str, help='dir to save event files')
 parser.add_argument('--tensorboard', action='store_true', default=False,
                     help='write results to events file')
 parser.add_argument('--device', type=int, default=-1, help='use cpu or gpu')
+parser.add_argument('--subsample', action='store_true', default=False,
+                    help='subsample train and test dataset')
 
 args = parser.parse_args()
-cudnn.benchmark = True  # Should make training should go faster for large models
-cudnn.benchmark = True  # Should make training should go faster for large models
+cudnn.benchmark = True  # Should make training go faster for large models
+cudnn.benchmark = True  # Should make training go faster for large models
 
 if args.device >= 0 and torch.cuda.is_available():
     device = torch.device('cuda:' + str(args.device))
@@ -76,6 +74,18 @@ np.random.seed(0)
 torch.cuda.manual_seed(args.seed)
 
 print(args)
+
+
+# initialize file writer
+if args.tensorboard:
+    if args.log_dir:
+        writer = SummaryWriter(log_dir=args.log_dir)
+    else:
+        print("please provide a directory to save event files: '--log_dir'")
+        sys.exit(1)
+else:
+    writer = None
+
 
 # Image Preprocessing
 if args.dataset == 'svhn':
@@ -123,22 +133,33 @@ elif args.dataset == 'svhn':
                                  transform=test_transform,
                                  download=True)
 
+if args.subsample:
+    train_size = train_dataset.train_data.shape[0]
+    train_sampler = torch.utils.data.sampler.SubsetRandomSampler(range(int(train_size/100)))
+    test_size = test_dataset.test_data.shape[0]
+    test_sampler = torch.utils.data.sampler.SubsetRandomSampler(range(int(test_size/100)))
+else:
+    train_sampler = None
+    test_sampler = None
+
 # Data Loader (Input Pipeline)
 train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
                                            batch_size=args.batch_size,
-                                           shuffle=True,
+                                           shuffle=False,
                                            pin_memory=True,
-                                           num_workers=2)
+                                           num_workers=2,
+                                           sampler=train_sampler)
 
 test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
                                           batch_size=args.batch_size,
                                           shuffle=False,
                                           pin_memory=True,
-                                          num_workers=2)
+                                          num_workers=2,
+                                          sampler=test_sampler)
 
 
-def plot_histograms(corr, conf, bins=50, norm_hist=True):
-    # Plot histogram of correctly classified and misclassified examples in visdom
+def plot_histograms(corr, conf, bins=50, norm_hist=True, epoch=None):
+    # Plot histogram of correctly classified and misclassified examples in tensorboard
     global conf_histogram
 
     plt.figure(figsize=(6, 4))
@@ -154,10 +175,11 @@ def plot_histograms(corr, conf, bins=50, norm_hist=True):
     img = Image.open(img_buffer)
     img = img.convert('RGB')
     img = torch.FloatTensor(np.array(img)).permute(2, 0, 1)
-    conf_histogram = vis.image(img, win=conf_histogram, opts=dict(title='Confidence Histogram'))
+    if writer is not None:
+        conf_histogram = writer.add_image('confidence histogram', img, epoch)
 
 
-def test(loader):
+def test(loader, epoch=None):
     cnn.eval()    # Change model to 'eval' mode (BN uses moving mean/var).
 
     correct = []
@@ -166,7 +188,8 @@ def test(loader):
 
 
     for images, labels in loader:
-        images = Variable(images, volatile=True).to(device)
+        with torch.no_grad():
+            images = images.to(device)
         labels = labels.to(device)
 
         pred, conf = cnn(images)
@@ -183,9 +206,9 @@ def test(loader):
     confidence = np.array(confidence)
 
     if args.baseline:
-        plot_histograms(correct, probability)
+        plot_histograms(correct, probability, epoch=epoch)
     else:
-        plot_histograms(correct, confidence)
+        plot_histograms(correct, confidence, epoch=epoch)
 
     val_acc = np.mean(correct)
     conf_min = np.min(confidence)
@@ -227,15 +250,6 @@ csv_logger = CSVLogger(args=args, filename='logs/' + filename + '.csv',
 # Start with a reasonable guess for lambda
 lmbda = 0.1
 
-# initialize file writer
-if args.tensorboard:
-    if args.log_dir:
-        writer = SummaryWriter(log_dir=args.log_dir)
-    else:
-        print("please provide a directory to save event files: '--log_dir'")
-        sys.exit(1)
-else:
-    writer = None
 
 for epoch in range(args.epochs):
 
@@ -248,9 +262,9 @@ for epoch in range(args.epochs):
     for i, (images, labels) in enumerate(progress_bar):
         progress_bar.set_description('Epoch ' + str(epoch))
 
-        images = Variable(images).to(device)
-        labels = Variable(labels).to(device)
-        labels_onehot = Variable(encode_onehot(labels, num_classes))
+        images = images.to(device)
+        labels = labels.to(device)
+        labels_onehot = Vencode_onehot(labels, num_classes)
 
         cnn.zero_grad()
 
@@ -308,7 +322,7 @@ for epoch in range(args.epochs):
                                                       'lambd': lmbda,
                                                       }, i)
 
-    test_acc, conf_min, conf_max, conf_avg = test(test_loader)
+    test_acc, conf_min, conf_max, conf_avg = test(test_loader, epoch=epoch)
     tqdm.write('test_acc: %.3f, conf_min: %.3f, conf_max: %.3f, conf_avg: %.3f' % (test_acc, conf_min, conf_max, conf_avg))
 
 
