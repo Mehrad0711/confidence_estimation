@@ -46,22 +46,28 @@ parser.add_argument('--checkpoint', default='cifar10_vgg13_budget_0.3_seed_0', t
                     help='filepath for checkpoint to load')
 parser.add_argument('--validation', action='store_true', default=False,
                     help='only use first 1000 samples from OOD dataset for validation')
+parser.add_argument('--device', type=int, default=-1, help='use cpu or gpu')
 
 args = parser.parse_args()
 cudnn.benchmark = True  # Should make training should go faster for large models
+
+if args.device >= 0 and torch.cuda.is_available():
+    device = torch.device('cuda:' + str(args.device))
+else:
+    device = torch.device('cpu')
 
 filename = args.checkpoint
 
 if args.ind_dataset == 'svhn' and args.model == 'wideresnet':
     args.model = 'wideresnet16_8'
 
-print args
+print(args)
 
 ###########################
 ### Set up data loaders ###
 ###########################
 
-if args.dataset == 'svhn':
+if args.ind_dataset == 'svhn':
     normalize = transforms.Normalize(mean=[x / 255.0 for x in[109.9, 109.7, 113.8]],
                                      std=[x / 255.0 for x in [50.1, 50.6, 50.8]])
 else:
@@ -157,19 +163,19 @@ else:
 ##############################
 
 if args.model == 'wideresnet':
-    cnn = WideResNet(depth=28, num_classes=num_classes, widen_factor=10).cuda()
+    cnn = WideResNet(depth=28, num_classes=num_classes, widen_factor=10).to(device)
 elif args.model == 'wideresnet16_8':
-    cnn = WideResNet(depth=16, num_classes=num_classes, widen_factor=8).cuda()
+    cnn = WideResNet(depth=16, num_classes=num_classes, widen_factor=8).to(device)
 elif args.model == 'densenet':
-    cnn = DenseNet3(depth=100, num_classes=num_classes, growth_rate=12, reduction=0.5).cuda()
+    cnn = DenseNet3(depth=100, num_classes=num_classes, growth_rate=12, reduction=0.5).to(device)
 elif args.model == 'vgg13':
-    cnn = VGG(vgg_name='VGG13', num_classes=num_classes).cuda()
+    cnn = VGG(vgg_name='VGG13', num_classes=num_classes).to(device)
 
 model_dict = cnn.state_dict()
 
 pretrained_dict = torch.load('checkpoints/' + filename + '.pt')
 cnn.load_state_dict(pretrained_dict)
-cnn = cnn.cuda()
+cnn = cnn.to(device)
 
 cnn.eval()
 
@@ -187,12 +193,12 @@ def evaluate(data_loader, mode):
         else:
             images = data
 
-        images = Variable(images, requires_grad=True).cuda()
+        images = Variable(images, requires_grad=True).to(device)
         images.retain_grad()
 
         if mode == 'confidence':
             _, confidence = cnn(images)
-            confidence = F.sigmoid(confidence)
+            confidence = torch.sigmoid(confidence)
             confidence = confidence.data.cpu().numpy()
             out.append(confidence)
 
@@ -201,7 +207,7 @@ def evaluate(data_loader, mode):
 
             cnn.zero_grad()
             _, confidence = cnn(images)
-            confidence = F.sigmoid(confidence).view(-1)
+            confidence = torch.sigmoid(confidence).view(-1)
             loss = torch.mean(-torch.log(confidence))
             loss.backward()
 
@@ -209,7 +215,7 @@ def evaluate(data_loader, mode):
             images = Variable(images.data, requires_grad=True)
 
             _, confidence = cnn(images)
-            confidence = F.sigmoid(confidence)
+            confidence = torch.sigmoid(confidence)
             confidence = confidence.data.cpu().numpy()
             out.append(confidence)
 

@@ -63,10 +63,10 @@ class Cutout(object):
             y = np.random.randint(h)
             x = np.random.randint(w)
 
-            y1 = np.clip(y - self.length / 2, 0, h)
-            y2 = np.clip(y + self.length / 2, 0, h)
-            x1 = np.clip(x - self.length / 2, 0, w)
-            x2 = np.clip(x + self.length / 2, 0, w)
+            y1 = np.clip(y - self.length / 2, 0, h).astype(np.int64)
+            y2 = np.clip(y + self.length / 2, 0, h).astype(np.int64)
+            x1 = np.clip(x - self.length / 2, 0, w).astype(np.int64)
+            x2 = np.clip(x + self.length / 2, 0, w).astype(np.int64)
 
             mask[y1: y2, x1: x2] = 0.
 

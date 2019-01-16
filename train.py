@@ -1,11 +1,14 @@
 import pdb
+import sys
 import visdom
 import argparse
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
 from io import BytesIO
-import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -21,6 +24,8 @@ from models.vgg import VGG
 from models.densenet import DenseNet3
 from models.wideresnet import WideResNet
 from utils.utils import encode_onehot, CSVLogger, Cutout
+
+from tensorboardX import SummaryWriter
 
 vis = visdom.Visdom()
 vis.env = 'confidence_estimation'
@@ -45,9 +50,19 @@ parser.add_argument('--budget', type=float, default=0.3, metavar='N',
                     help='the budget for how often the network can get hints')
 parser.add_argument('--baseline', action='store_true', default=False,
                     help='train model without confidence branch')
+parser.add_argument('--log_dir', type=str, help='dir to save event files')
+parser.add_argument('--tensorboard', action='store_true', default=False,
+                    help='write results to events file')
+parser.add_argument('--device', type=int, default=-1, help='use cpu or gpu')
 
 args = parser.parse_args()
 cudnn.benchmark = True  # Should make training should go faster for large models
+cudnn.benchmark = True  # Should make training should go faster for large models
+
+if args.device >= 0 and torch.cuda.is_available():
+    device = torch.device('cuda:' + str(args.device))
+else:
+    device = torch.device('cpu')
 
 if args.baseline:
     args.budget = 0.
@@ -60,7 +75,7 @@ if args.dataset == 'svhn' and args.model == 'wideresnet':
 np.random.seed(0)
 torch.cuda.manual_seed(args.seed)
 
-print args
+print(args)
 
 # Image Preprocessing
 if args.dataset == 'svhn':
@@ -149,13 +164,14 @@ def test(loader):
     probability = []
     confidence = []
 
+
     for images, labels in loader:
-        images = Variable(images, volatile=True).cuda()
-        labels = labels.cuda()
+        images = Variable(images, volatile=True).to(device)
+        labels = labels.to(device)
 
         pred, conf = cnn(images)
         pred = F.softmax(pred, dim=-1)
-        conf = F.sigmoid(conf).data.view(-1)
+        conf = torch.sigmoid(conf).data.view(-1)
 
         pred_value, pred = torch.max(pred.data, 1)
         correct.extend((pred == labels).cpu().numpy())
@@ -181,15 +197,15 @@ def test(loader):
 
 
 if args.model == 'wideresnet':
-    cnn = WideResNet(depth=28, num_classes=num_classes, widen_factor=10).cuda()
+    cnn = WideResNet(depth=28, num_classes=num_classes, widen_factor=10).to(device)
 elif args.model == 'wideresnet16_8':
-    cnn = WideResNet(depth=16, num_classes=num_classes, widen_factor=8).cuda()
+    cnn = WideResNet(depth=16, num_classes=num_classes, widen_factor=8).to(device)
 elif args.model == 'densenet':
-    cnn = DenseNet3(depth=100, num_classes=num_classes, growth_rate=12, reduction=0.5).cuda()
+    cnn = DenseNet3(depth=100, num_classes=num_classes, growth_rate=12, reduction=0.5).to(device)
 elif args.model == 'vgg13':
-    cnn = VGG(vgg_name='VGG13', num_classes=num_classes).cuda()
+    cnn = VGG(vgg_name='VGG13', num_classes=num_classes).to(device)
 
-prediction_criterion = nn.NLLLoss().cuda()
+prediction_criterion = nn.NLLLoss().to(device)
 
 cnn_optimizer = torch.optim.SGD(cnn.parameters(), lr=args.learning_rate,
                                 momentum=0.9, nesterov=True, weight_decay=5e-4)
@@ -211,6 +227,16 @@ csv_logger = CSVLogger(args=args, filename='logs/' + filename + '.csv',
 # Start with a reasonable guess for lambda
 lmbda = 0.1
 
+# initialize file writer
+if args.tensorboard:
+    if args.log_dir:
+        writer = SummaryWriter(log_dir=args.log_dir)
+    else:
+        print("please provide a directory to save event files: '--log_dir'")
+        sys.exit(1)
+else:
+    writer = None
+
 for epoch in range(args.epochs):
 
     xentropy_loss_avg = 0.
@@ -222,8 +248,8 @@ for epoch in range(args.epochs):
     for i, (images, labels) in enumerate(progress_bar):
         progress_bar.set_description('Epoch ' + str(epoch))
 
-        images = Variable(images).cuda(async=True)
-        labels = Variable(labels).cuda(async=True)
+        images = Variable(images).to(device)
+        labels = Variable(labels).to(device)
         labels_onehot = Variable(encode_onehot(labels, num_classes))
 
         cnn.zero_grad()
@@ -231,7 +257,7 @@ for epoch in range(args.epochs):
         pred_original, confidence = cnn(images)
 
         pred_original = F.softmax(pred_original, dim=-1)
-        confidence = F.sigmoid(confidence)
+        confidence = torch.sigmoid(confidence)
 
         # Make sure we don't have any numerical instability
         eps = 1e-12
@@ -240,7 +266,7 @@ for epoch in range(args.epochs):
 
         if not args.baseline:
             # Randomly set half of the confidences to 1 (i.e. no hints)
-            b = Variable(torch.bernoulli(torch.Tensor(confidence.size()).uniform_(0, 1))).cuda()
+            b = Variable(torch.bernoulli(torch.Tensor(confidence.size()).uniform_(0, 1))).to(device)
             conf = confidence * b + (1 - b)
             pred_new = pred_original * conf.expand_as(pred_original) + labels_onehot * (1 - conf.expand_as(labels_onehot))
             pred_new = torch.log(pred_new)
@@ -255,16 +281,16 @@ for epoch in range(args.epochs):
         else:
             total_loss = xentropy_loss + (lmbda * confidence_loss)
 
-            if args.budget > confidence_loss.data[0]:
+            if args.budget > confidence_loss.item():
                 lmbda = lmbda / 1.01
-            elif args.budget <= confidence_loss.data[0]:
+            elif args.budget <= confidence_loss.item():
                 lmbda = lmbda / 0.99
 
         total_loss.backward()
         cnn_optimizer.step()
 
-        xentropy_loss_avg += xentropy_loss.data[0]
-        confidence_loss_avg += confidence_loss.data[0]
+        xentropy_loss_avg += xentropy_loss.item()
+        confidence_loss_avg += confidence_loss.item()
 
         pred_idx = torch.max(pred_original.data, 1)[1]
         total += labels.size(0)
@@ -276,8 +302,16 @@ for epoch in range(args.epochs):
             confidence_loss='%.3f' % (confidence_loss_avg / (i + 1)),
             acc='%.3f' % accuracy)
 
+        if writer is not None:
+            writer.add_scalars(f'data/scalar_group', {'xentropy_loss': xentropy_loss_avg / (i + 1),
+                                                      'confidence_loss': confidence_loss_avg / (i + 1),
+                                                      'lambd': lmbda,
+                                                      }, i)
+
     test_acc, conf_min, conf_max, conf_avg = test(test_loader)
     tqdm.write('test_acc: %.3f, conf_min: %.3f, conf_max: %.3f, conf_avg: %.3f' % (test_acc, conf_min, conf_max, conf_avg))
+
+
 
     scheduler.step(epoch)
 
