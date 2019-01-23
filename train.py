@@ -264,7 +264,7 @@ for epoch in range(args.epochs):
 
         images = images.to(device)
         labels = labels.to(device)
-        labels_onehot = Vencode_onehot(labels, num_classes)
+        labels_onehot = encode_onehot(labels, num_classes)
 
         cnn.zero_grad()
 
